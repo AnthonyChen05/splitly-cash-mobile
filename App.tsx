@@ -28,6 +28,7 @@ const App: React.FC = () => {
   const [isManualInputVisible, setIsManualInputVisible] = useState(false);
   const [manualSubtotal, setManualSubtotal] = useState('');
   const [taxInputMode, setTaxInputMode] = useState<'percent' | 'amount'>('percent');
+  const [discountInputMode, setDiscountInputMode] = useState<'percent' | 'amount'>('percent');
   
   const [darkMode, setDarkMode] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
@@ -45,8 +46,8 @@ const App: React.FC = () => {
     taxOnPostTip: false, 
     roundingMode: 'none',
     splitOverheadEqually: true,
-    cashDiscountRate: 10,
-    isCashDiscountEnabled: false,
+    cashDiscountRate: 0,
+    discountAmount: null,
   });
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
@@ -73,9 +74,9 @@ const App: React.FC = () => {
     settings.taxOnPostTip,
     settings.roundingMode,
     settings.taxAmount,
-    settings.isCashDiscountEnabled,
-    settings.cashDiscountRate
-  ), [subtotal, settings.taxRate, settings.tipRate, settings.tipOnPreTax, settings.taxOnPostTip, settings.roundingMode, settings.taxAmount, settings.isCashDiscountEnabled, settings.cashDiscountRate]);
+    settings.cashDiscountRate,
+    settings.discountAmount
+  ), [subtotal, settings.taxRate, settings.tipRate, settings.tipOnPreTax, settings.taxOnPostTip, settings.roundingMode, settings.taxAmount, settings.cashDiscountRate, settings.discountAmount]);
 
   const comparisonData = useMemo(() => {
     const tipPresets = [15, 18, 20, 22, 25];
@@ -89,49 +90,69 @@ const App: React.FC = () => {
         settings.taxOnPostTip, 
         settings.roundingMode, 
         settings.taxAmount,
-        settings.isCashDiscountEnabled,
-        settings.cashDiscountRate
+        settings.cashDiscountRate,
+        settings.discountAmount
       )
     }));
-  }, [subtotal, settings.taxRate, settings.tipOnPreTax, settings.taxOnPostTip, settings.roundingMode, settings.taxAmount, settings.isCashDiscountEnabled, settings.cashDiscountRate]);
+  }, [subtotal, settings.taxRate, settings.tipOnPreTax, settings.taxOnPostTip, settings.roundingMode, settings.taxAmount, settings.cashDiscountRate, settings.discountAmount]);
 
   const getBreakdown = (currentTotals: Totals, currentSettings: SplitSettings, target: 'bill' | 'individual') => {
+    const userIds = users.map(u => u.id);
     const breakdown: Record<string, { base: number; tax: number; tip: number; total: number }> = {};
-    users.forEach(u => breakdown[u.id] = { base: 0, tax: 0, tip: 0, total: 0 });
+    userIds.forEach(id => breakdown[id] = { base: 0, tax: 0, tip: 0, total: 0 });
 
-    const discountFactor = currentSettings.isCashDiscountEnabled ? (1 - currentSettings.cashDiscountRate / 100) : 1;
-    const unassignedItems = items.filter(item => !assignments[item.id] || assignments[item.id].length === 0);
+    const discountFactor = (1 - currentTotals.cashDiscountAmount / (subtotal || 1));
     
+    // 1. Calculate Base for each user
     (Object.entries(assignments) as [string, Assignment[]][]).forEach(([itemId, itemAssignments]) => {
       itemAssignments.forEach(a => {
         if (breakdown[a.userId]) breakdown[a.userId].base += a.amount * discountFactor;
       });
     });
 
+    const unassignedItems = items.filter(item => !assignments[item.id] || assignments[item.id].length === 0);
     if (unassignedItems.length > 0 && users.length > 0) {
       const sharedTotal = unassignedItems.reduce((s, i) => s + i.price, 0);
       const perUser = (sharedTotal * discountFactor) / users.length;
-      users.forEach(u => breakdown[u.id].base += perUser);
+      userIds.forEach(id => breakdown[id].base += perUser);
     }
 
-    const totalBase = Object.values(breakdown).reduce((s, b) => s + b.base, 0);
-    const userCount = users.length;
+    // Ensure sum of base matches subtotal - discount
+    const targetTotalBase = precise(subtotal - currentTotals.cashDiscountAmount);
+    let currentSumBase = 0;
+    userIds.forEach((id, index) => {
+      if (index === userIds.length - 1) {
+        breakdown[id].base = precise(targetTotalBase - currentSumBase);
+      } else {
+        breakdown[id].base = precise(breakdown[id].base);
+        currentSumBase = precise(currentSumBase + breakdown[id].base);
+      }
+    });
 
-    if (userCount > 0) {
-      const taxFactor = currentTotals.tax / (totalBase || 1);
-      const tipFactor = currentTotals.tip / (totalBase || 1);
+    // 2. Calculate Tax and Tip
+    if (userIds.length > 0) {
+      let currentSumTax = 0;
+      let currentSumTip = 0;
 
-      Object.keys(breakdown).forEach(userId => {
-        const b = breakdown[userId];
-        if (currentSettings.splitOverheadEqually) {
-          b.tax = precise(currentTotals.tax / userCount);
-          b.tip = precise(currentTotals.tip / userCount);
-        } else if (totalBase > 0) {
-          b.tax = precise(b.base * taxFactor);
-          b.tip = precise(b.base * tipFactor);
+      userIds.forEach((id, index) => {
+        const b = breakdown[id];
+        if (index === userIds.length - 1) {
+          b.tax = precise(currentTotals.tax - currentSumTax);
+          b.tip = precise(currentTotals.tip - currentSumTip);
+        } else {
+          if (currentSettings.splitOverheadEqually) {
+            b.tax = precise(currentTotals.tax / userIds.length);
+            b.tip = precise(currentTotals.tip / userIds.length);
+          } else if (targetTotalBase > 0) {
+            b.tax = precise((b.base / targetTotalBase) * currentTotals.tax);
+            b.tip = precise((b.base / targetTotalBase) * currentTotals.tip);
+          }
+          currentSumTax = precise(currentSumTax + b.tax);
+          currentSumTip = precise(currentSumTip + b.tip);
         }
         b.total = precise(b.base + b.tax + b.tip);
 
+        // Individual Rounding (Applied after splitting, may result in sum != total)
         if (target === 'individual' && currentSettings.roundingMode !== 'none') {
           let rounded: number;
           switch (currentSettings.roundingMode) {
@@ -145,6 +166,7 @@ const App: React.FC = () => {
         }
       });
     }
+
     return breakdown;
   };
 
@@ -418,24 +440,35 @@ const App: React.FC = () => {
                     <div className="space-y-1">
                       <div className="flex items-center gap-2">
                         <label className="text-[9px] font-black text-slate-400 uppercase">Discount</label>
-                        <button 
-                          onClick={() => setSettings({...settings, isCashDiscountEnabled: !settings.isCashDiscountEnabled})}
-                          className={`w-6 h-3 rounded-full relative transition-colors ${settings.isCashDiscountEnabled ? 'bg-emerald-500' : 'bg-slate-700'}`}
-                        >
-                          <div className={`absolute top-0.5 w-2 h-2 rounded-full bg-white transition-all ${settings.isCashDiscountEnabled ? 'left-3.5' : 'left-0.5'}`} />
-                        </button>
+                        <div className={`flex p-0.5 rounded-md transition-colors ${darkMode ? 'bg-slate-800' : 'bg-slate-200'}`}>
+                           <button onClick={() => setDiscountInputMode('percent')} className={`p-0.5 rounded transition-all ${discountInputMode === 'percent' ? (darkMode ? 'bg-emerald-600 text-white' : 'bg-white text-emerald-600 shadow-xs') : 'text-slate-500'}`}><Percent className="w-2 h-2" /></button>
+                           <button onClick={() => setDiscountInputMode('amount')} className={`p-0.5 rounded transition-all ${discountInputMode === 'amount' ? (darkMode ? 'bg-emerald-600 text-white' : 'bg-white text-emerald-600 shadow-xs') : 'text-slate-500'}`}><DollarSign className="w-2 h-2" /></button>
+                        </div>
                       </div>
-                      <div className="relative">
-                        <input 
-                          type="number" 
-                          step="0.1" 
-                          disabled={!settings.isCashDiscountEnabled}
-                          value={settings.cashDiscountRate} 
-                          onChange={(e) => setSettings({...settings, cashDiscountRate: parseFloat(e.target.value) || 0})} 
-                          className={`w-full border-none rounded-lg px-2 py-1.5 text-xs sm:text-sm font-bold focus:ring-1 focus:ring-emerald-500 outline-none transition-colors ${!settings.isCashDiscountEnabled ? 'opacity-50 cursor-not-allowed' : ''} ${darkMode ? 'bg-slate-800 text-white' : 'bg-slate-50 text-slate-900'}`} 
-                        />
-                        <span className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[8px] font-black text-slate-400">%</span>
-                      </div>
+                      {discountInputMode === 'percent' ? (
+                        <div className="relative">
+                          <input 
+                            type="number" 
+                            step="0.1" 
+                            value={settings.cashDiscountRate} 
+                            onChange={(e) => setSettings({...settings, cashDiscountRate: parseFloat(e.target.value) || 0, discountAmount: null})} 
+                            className={`w-full border-none rounded-lg px-2 py-1.5 text-xs sm:text-sm font-bold focus:ring-1 focus:ring-emerald-500 outline-none transition-colors ${darkMode ? 'bg-slate-800 text-white' : 'bg-slate-50 text-slate-900'}`} 
+                          />
+                          <span className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[8px] font-black text-slate-400">%</span>
+                        </div>
+                      ) : (
+                        <div className="relative">
+                           <span className="absolute left-1.5 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-[10px]">$</span>
+                           <input 
+                             type="number" 
+                             step="0.01" 
+                             value={settings.discountAmount || ''} 
+                             onChange={(e) => setSettings({...settings, discountAmount: parseFloat(e.target.value) || 0})} 
+                             placeholder="0.00" 
+                             className={`w-full border-none rounded-lg pl-4 pr-2 py-1.5 text-xs sm:text-sm font-bold focus:ring-1 focus:ring-emerald-500 outline-none transition-colors ${darkMode ? 'bg-slate-800 text-white' : 'bg-slate-50 text-slate-900'}`} 
+                           />
+                        </div>
+                      )}
                     </div>
 
                     <div className="space-y-1">

@@ -29,7 +29,7 @@ export interface SplitSettings {
   roundingMode: RoundingMode;
   splitOverheadEqually: boolean;
   cashDiscountRate: number;
-  isCashDiscountEnabled: boolean;
+  discountAmount: number | null;
 }
 
 export interface Totals {

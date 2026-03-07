@@ -20,10 +20,10 @@ export const calculateTotals = (
   taxOnPostTip: boolean,
   roundingMode: RoundingMode,
   taxAmount: number | null = null,
-  isCashDiscountEnabled: boolean = false,
-  cashDiscountRate: number = 0
+  cashDiscountRate: number = 0,
+  discountAmount: number | null = null
 ) => {
-  const cashDiscountAmount = isCashDiscountEnabled ? precise(subtotal * (cashDiscountRate / 100)) : 0;
+  const cashDiscountAmount = (discountAmount !== null ? precise(discountAmount) : precise(subtotal * (cashDiscountRate / 100)));
   const effectiveSubtotal = subtotal - cashDiscountAmount;
 
   // 1. Initial Tax calculation
