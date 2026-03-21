@@ -6,14 +6,13 @@ import { calculateTotals, formatCurrency, precise } from './utils/math';
 import ReceiptItemCard from './components/ReceiptItemCard';
 import AssignmentModal from './components/AssignmentModal';
 import SummaryFooter from './components/SummaryFooter';
-import { GoogleGenAI, Type } from "@google/genai";
-import { 
-  Plus, Users, Receipt, 
+import {
+  Plus, Users, Receipt,
   Settings, Image as ImageIcon,
   Trash2, Loader2, Equal, ArrowUp, ArrowDown, Minus,
   LayoutGrid, Info, Calculator, TableProperties,
   UserCheck, Banknote, UserPlus, Users2, Sun, Moon,
-  Eraser, Edit3, Percent, DollarSign
+  Eraser, Edit3, Percent, DollarSign, Key, Eye, EyeOff, X
 } from 'lucide-react';
 
 const App: React.FC = () => {
@@ -51,6 +50,15 @@ const App: React.FC = () => {
   });
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
+  const [geminiApiKey, setGeminiApiKey] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('gemini_api_key') || '';
+    }
+    return '';
+  });
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [showApiKey, setShowApiKey] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -192,9 +200,34 @@ const App: React.FC = () => {
     });
   }, [subtotal, settings, users, assignments, roundingTarget]);
 
+  const saveApiKey = () => {
+    const key = apiKeyInput.trim();
+    if (key) {
+      setGeminiApiKey(key);
+      localStorage.setItem('gemini_api_key', key);
+      setShowApiKeyModal(false);
+      setApiKeyInput('');
+      setShowApiKey(false);
+    }
+  };
+
+  const clearApiKey = () => {
+    setGeminiApiKey('');
+    localStorage.removeItem('gemini_api_key');
+    setApiKeyInput('');
+    setShowApiKey(false);
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (!geminiApiKey) {
+      setShowApiKeyModal(true);
+      if (e.target) e.target.value = '';
+      return;
+    }
+
     setIsScanning(true);
     try {
       const base64Promise = new Promise<string>((resolve, reject) => {
@@ -204,67 +237,54 @@ const App: React.FC = () => {
         reader.readAsDataURL(file);
       });
       const base64Data = await base64Promise;
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: [{ parts: [
-          { inlineData: { data: base64Data, mimeType: file.type || 'image/jpeg' } },
-          { text: "Extract all individual line items from this receipt. For each item, provide the name and the final price. Also extract the subtotal and the total tax amount. If an item has a quantity greater than 1, please list it as a single entry with the total price for that line. Return the data in JSON format." }
-        ] }],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              items: { 
-                type: Type.ARRAY, 
-                items: { 
-                  type: Type.OBJECT, 
-                  properties: { 
-                    name: { type: Type.STRING }, 
-                    price: { type: Type.NUMBER } 
-                  }, 
-                  required: ["name", "price"] 
-                } 
-              },
-              tax: { type: Type.NUMBER },
-              subtotal: { type: Type.NUMBER }
-            },
-            required: ["items", "tax", "subtotal"]
-          }
-        }
+
+      const res = await fetch('/api/scan-receipt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          base64Data,
+          mimeType: file.type || 'image/jpeg',
+          apiKey: geminiApiKey,
+        }),
       });
 
-      const text = response.text;
-      if (!text) throw new Error("No response from AI");
-      
-      const data = JSON.parse(text);
+      const data = await res.json();
+
+      if (!res.ok) {
+        if (res.status === 401) {
+          alert(data.error || 'Invalid API key. Please check your Gemini API key in settings.');
+          setShowApiKeyModal(true);
+          return;
+        }
+        throw new Error(data.error || 'Failed to scan receipt');
+      }
+
       if (data.items && data.items.length > 0) {
-        const newItems = data.items.map((item: any, idx: number) => ({ 
-          id: `ai-${Date.now()}-${idx}`, 
+        const newItems = data.items.map((item: any, idx: number) => ({
+          id: `ai-${Date.now()}-${idx}`,
           name: item.name || 'Unknown Item',
           price: typeof item.price === 'number' ? item.price : parseFloat(item.price) || 0
         }));
-        
+
         setItems(newItems);
-        
+
         if (data.subtotal > 0 && data.tax >= 0) {
           const calculatedRate = (data.tax / data.subtotal) * 100;
-          setSettings(prev => ({ 
-            ...prev, 
+          setSettings(prev => ({
+            ...prev,
             taxRate: precise(calculatedRate) || 8.875,
-            taxAmount: null 
+            taxAmount: null
           }));
         }
-        
+
         setAssignments({});
         setSelectedItemIds(new Set());
       }
-    } catch (error) { 
+    } catch (error: any) {
       console.error("Scan failed:", error);
-      alert("Failed to scan receipt. Please try again or enter items manually.");
-    } finally { 
-      setIsScanning(false); 
+      alert(error.message || "Failed to scan receipt. Please try again or enter items manually.");
+    } finally {
+      setIsScanning(false);
       if (e.target) e.target.value = '';
     }
   };
@@ -309,13 +329,75 @@ const App: React.FC = () => {
         </div>
       )}
 
+      {showApiKeyModal && (
+        <div className="fixed inset-0 z-[100] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in">
+          <div className={`w-full max-w-md rounded-2xl border shadow-2xl transition-colors ${darkMode ? 'bg-slate-900 border-slate-700' : 'bg-white border-slate-200'}`}>
+            <div className={`flex items-center justify-between p-4 border-b ${darkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+              <div className="flex items-center gap-2">
+                <Key className="w-4 h-4 text-blue-500" />
+                <h3 className={`font-black text-sm uppercase tracking-wider ${darkMode ? 'text-white' : 'text-slate-800'}`}>Gemini API Key</h3>
+              </div>
+              <button onClick={() => { setShowApiKeyModal(false); setApiKeyInput(''); setShowApiKey(false); }} className={`p-1 rounded-lg transition-colors ${darkMode ? 'hover:bg-slate-800 text-slate-400' : 'hover:bg-slate-100 text-slate-500'}`}>
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-4">
+              {geminiApiKey ? (
+                <div className={`flex items-center gap-2 p-3 rounded-xl border ${darkMode ? 'bg-emerald-900/20 border-emerald-800 text-emerald-400' : 'bg-emerald-50 border-emerald-200 text-emerald-700'}`}>
+                  <Key className="w-3.5 h-3.5 flex-shrink-0" />
+                  <span className="text-xs font-bold flex-1">Key set: ...{geminiApiKey.slice(-6)}</span>
+                  <button onClick={clearApiKey} className={`text-[9px] font-black uppercase px-2 py-1 rounded-lg transition-colors ${darkMode ? 'bg-rose-900/30 text-rose-400 hover:bg-rose-900/50' : 'bg-rose-50 text-rose-600 hover:bg-rose-100'}`}>Remove</button>
+                </div>
+              ) : null}
+              <div>
+                <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1.5">
+                  {geminiApiKey ? 'Replace API Key' : 'Enter API Key'}
+                </label>
+                <div className="relative">
+                  <input
+                    type={showApiKey ? 'text' : 'password'}
+                    value={apiKeyInput}
+                    onChange={(e) => setApiKeyInput(e.target.value)}
+                    placeholder="AIzaSy..."
+                    className={`w-full border rounded-lg px-3 pr-10 py-2.5 text-sm font-mono focus:ring-2 focus:ring-blue-500 outline-none transition-colors ${darkMode ? 'bg-slate-800 border-slate-700 text-white placeholder-slate-500' : 'bg-slate-50 border-slate-200 text-slate-900 placeholder-slate-400'}`}
+                    onKeyDown={(e) => e.key === 'Enter' && saveApiKey()}
+                    autoFocus
+                  />
+                  <button onClick={() => setShowApiKey(!showApiKey)} className={`absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded transition-colors ${darkMode ? 'text-slate-500 hover:text-slate-300' : 'text-slate-400 hover:text-slate-600'}`}>
+                    {showApiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+                <p className={`text-[9px] mt-1.5 ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                  Get your key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline">Google AI Studio</a>. Your key is stored locally in your browser.
+                </p>
+              </div>
+              <button
+                onClick={saveApiKey}
+                disabled={!apiKeyInput.trim()}
+                className="w-full py-2.5 bg-blue-600 text-white rounded-xl font-black text-xs uppercase tracking-widest hover:bg-blue-700 transition-all shadow-lg shadow-blue-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Save Key
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <header className={`sticky top-0 z-30 px-4 sm:px-6 py-1.5 flex items-center justify-between border-b shadow-sm backdrop-blur-md transition-colors ${darkMode ? 'bg-slate-900/80 border-slate-800' : 'bg-white/80 border-slate-200'}`}>
         <div className="flex items-center gap-2">
           <div className="bg-blue-600 p-1 rounded-lg shadow-lg shadow-blue-500/20"><Receipt className="text-white w-4 h-4" /></div>
           <div><h1 className={`text-sm sm:text-base font-black transition-colors ${darkMode ? 'text-white' : 'text-slate-800'}`}>SPLITLY</h1><p className="text-[7px] text-slate-400 font-bold uppercase tracking-widest mt-0">NYC BILL SPLITTER</p></div>
         </div>
         <div className="flex gap-1">
-          <button 
+          <button
+            onClick={() => { setShowApiKeyModal(true); setApiKeyInput(''); }}
+            className={`p-1.5 rounded-lg transition-all border relative ${geminiApiKey ? (darkMode ? 'bg-slate-800 border-emerald-700 text-emerald-400 hover:bg-slate-700' : 'bg-emerald-50 border-emerald-200 text-emerald-600 hover:bg-emerald-100') : (darkMode ? 'bg-slate-800 border-amber-700 text-amber-400 hover:bg-slate-700' : 'bg-amber-50 border-amber-200 text-amber-600 hover:bg-amber-100')}`}
+            title={geminiApiKey ? 'API key configured' : 'Set Gemini API key'}
+          >
+            <Key className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+            {!geminiApiKey && <span className="absolute -top-1 -right-1 w-2 h-2 bg-amber-500 rounded-full animate-pulse" />}
+          </button>
+          <button
             onClick={() => setDarkMode(!darkMode)}
             className={`p-1.5 rounded-lg transition-all border ${darkMode ? 'bg-slate-800 border-slate-700 text-yellow-400 hover:bg-slate-700' : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'}`}
           >
